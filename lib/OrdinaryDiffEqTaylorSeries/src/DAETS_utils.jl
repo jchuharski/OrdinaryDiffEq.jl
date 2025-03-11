@@ -7,54 +7,52 @@ using GLPK
 using OrdinaryDiffEq: ODEFunction, DAEFunction
 using SciMLBase
 using LinearAlgebra: UniformScaling
+using TaylorDiff: TaylorScalar, extract_derivative, derivative
+using ForwardDiff
 
 export signature_matrix, highest_value_transversal, find_offsets, system_jacobian
+
 """
     signature_matrix(eqs, vars, t_ind) -> Matrix{Float64}
 
-Construct the signature matrix Σ for the system of equations `eqs` with respect to
-the variables `vars`. Each entry Σ[i,j] is the (highest) derivative order of `vars[j]`
+Construct the signature matrix Σ for the system of equations eqs with respect to
+the variables vars. Each entry Σ[i,j] is the (highest) derivative order of vars[j]
 appearing in eqs[i], or -Inf if it does not appear.
-
-`eqs` can be a vector of symbolic expressions, an ODEFunction/DAEFunction object, or a function.
-`vars` can be a vector of variables or a NullParameters object.
 """
 function signature_matrix(eqs, vars, t_ind)
-    # For non-symbolic inputs, just return a default signature matrix
-    if !(vars isa Vector) || !(eqs isa Vector)
-        # Try to determine the system size
-        n = 1
+    if vars isa Vector{<:SymbolicUtils.BasicSymbolic} && eqs isa Vector{<:SymbolicUtils.BasicSymbolic}
+        n_eqs = length(eqs)
+        n_vars = length(vars)
+        Σ = fill(-Inf, n_eqs, n_vars)
         
-        # If eqs is an ODEFunction, try to get size from u_prototype
-        if eqs isa ODEFunction && hasproperty(eqs, :u_prototype) && !isnothing(eqs.u_prototype)
-            n = length(eqs.u_prototype)
+        for i in 1:n_eqs
+            for j in 1:n_vars
+                # Check for each variable in the equation what the highest derivative order is
+                order = max_derivative_order(eqs[i], vars[j], t_ind)
+                Σ[i,j] = order
+            end
         end
-        #########################################################
-        # TODO: This is a placeholder ###########################
-        #########################################################
+        return Σ
+    else
+        println("Non-symbolic inputs detected")
+        # Just use a default signature matrix for now
+        # TODO: Add a better way to handle this
+        n = length(vars)
         Σ = zeros(n, n)
         for i in 1:n
             for j in 1:n
-                Σ[i,j] = i == j ? 1.0 : 0.0
+                if i == j
+                    Σ[i,j] = 1.0  # Assume first-order derivatives on diagonal
+                else
+                    Σ[i,j] = 0.0  # Assume direct dependencies off-diagonal
+                end
             end
         end
         return Σ
     end
-    
-    # Original implementation for symbolic expressions (probably do not need this but keeping it here for now)
-    n_eqs   = length(eqs)
-    n_vars  = length(vars)
-    Σ = fill(-Inf, n_eqs, n_vars) # Initialize with -Inf
-
-    for i in 1:n_eqs
-        for j in 1:n_vars
-            # Check for each variable in the equation what the highest derivative order is
-            order = max_derivative_order(eqs[i], vars[j], t_ind)
-            Σ[i,j] = order
-        end
-    end
-    return Σ
 end
+
+
 """
     max_derivative_order(ex, var, t_ind)
 
@@ -123,7 +121,7 @@ function find_offsets(Σ::Matrix{Float64}, T::Vector{Tuple{Int, Int}})
     n = size(Σ, 1)
     # Create JuMP model with GLPK solver
     model = Model(GLPK.Optimizer)
-    # Define variables for c and d (offsets)
+    # Define variables for c and d (offsets)f
     @variable(model, c[1:n] >= 0, Int)
     @variable(model, d[1:n] >= 0, Int)
     
@@ -151,12 +149,11 @@ end
 
 
 """
-    system_jacobian(eqs, vars, t_ind, c, d, Σ) -> Matrix
+    system_jacobian(eqs, vars, t_ind, c, d, Σ, integrator=nothing) -> Matrix
 
 Constructs the System Jacobian matrix J for the system of equations `eqs` with respect to the variables `vars`.
-The offsets `c` and `d` and the signature matrix `Σ` are used to determine the structure of the Jacobian.
-
-Handles both symbolic expressions and ODE/DAE function objects.
+The offsets `c` and `d` and the signature matrix `Σ` are used to determine the structure of the Jacobian. Trying to do
+this with TaylorDiff.
 """
 function system_jacobian(
     eqs,
@@ -164,59 +161,35 @@ function system_jacobian(
     t_ind,
     c::Vector{Int},
     d::Vector{Int},
-    Σ::Matrix{Float64}
+    Σ::Matrix{Float64},
+    integrator=nothing
 )
-    # Try to create numerical Jacobian
-    if !(vars isa Vector{<:SymbolicUtils.BasicSymbolic}) || !(eqs isa Vector{<:SymbolicUtils.BasicSymbolic})
-        # Get the size from the signature matrix
-        n = size(Σ, 1)
-        
-        # For ODEFunction, we can try to use its jacobian if available
-        if eqs isa ODEFunction && hasproperty(eqs, :jac) && !isnothing(eqs.jac)
-            return eqs.jac
-        else
-            # Create a default jacobian based on the signature matrix
-            #########################################################
-            # TODO: This is a placeholder. Fix Jacobian Calculation #
-            #########################################################
-            J = zeros(n, n)
-            for i in 1:n
-                for j in 1:n
-                    if d[j] - c[i] == Σ[i, j]
-                        J[i, j] = 1.0  # Non-zero entry where the signature matrix indicates
-                    else
-                        J[i, j] = 0.0
-                    end
-                end
-            end
-            return J
-        end
-    end
+    n = size(Σ, 1)
+    J = zeros(n, n)
     
-    # The original implementation for symbolics.
-    n = length(eqs)
-    J = zeros(Symbolics.Num, n, n)
-
     for i in 1:n
         for j in 1:n
-            if d[j] - c[i] == Σ[i, j]
-                f_i = eqs[i]
-                x_j = vars[j]
-                σ_ij = Int(Σ[i, j])
-                # Compute the σ_ij-th derivative of x_j
-                x_j_deriv = x_j(t_ind)
-                for _ in 1:σ_ij
-                    x_j_deriv = Differential(t_ind)(x_j_deriv)
+            if d[j] - c[i] == Σ[i,j] && Σ[i,j] != -Inf
+                σ_ij = Int(Σ[i,j])
+                p_actual = integrator !== nothing ? integrator.p : nothing
+                
+                # Create a function that evaluates the i-th equation with respect to the j-th variable
+                function f_ij(x)
+                    x_full = copy(vars) # copy state vector
+                    x_full[j] = x #Replace j with x
+                    # Evaluate
+                    result = zeros(n)
+                    eqs.f(result, x_full, p_actual, t_ind)
+                    return result[i]
                 end
-                # Compute the partial derivative ∂f_i / ∂x_j^(σ_ij)
-                J[i, j] = expand_derivatives(Differential(x_j_deriv)(f_i))
+                # Calculate the σ_ij-th derivative
+                J[i,j] = derivative(f_ij, vars[j], Val{σ_ij}())
             else
-                # Set J[i, j] = 0 if d[j] - c[i] != Σ[i, j]
-                J[i, j] = 0
+                J[i,j] = 0.0
             end
         end
     end
-
+    println("System Jacobian: ", J)
     return J
 end
 

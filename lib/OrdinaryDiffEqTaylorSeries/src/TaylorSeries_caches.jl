@@ -98,6 +98,7 @@ get_fsalfirstlast(cache::ExplicitTaylorCache, u) = (cache.ks[1], cache.ks[1])
     c::Vector{Int}    # Offsets for equations
     d::Vector{Int}    # Offsets for variables
     J::MatType        # Jacobian
+    coeffs::Vector{uType}
 end
 
 function alg_cache(alg::DAETS, u, rate_prototype, ::Type{uEltypeNoUnits},
@@ -129,6 +130,7 @@ function alg_cache(alg::DAETS, u, rate_prototype, ::Type{uEltypeNoUnits},
     c = zeros(Int, n)  # Equation offsets
     d = zeros(Int, n)  # Variable offsets
     J = zeros(n, n)  # Jacobian
+    coeffs = [zeros(n) for _ in 1:5]
 
     # Return cache
     return DAETSCache{
@@ -139,7 +141,26 @@ function alg_cache(alg::DAETS, u, rate_prototype, ::Type{uEltypeNoUnits},
         u, uprev, k1, k2, k3, utilde, tmp, atmp, 
         alg.stage_limiter!, alg.step_limiter!, alg.thread,
         xcur, xTS, xtrial, htrial, e,
-        Σ, c, d, J 
+        Σ, c, d, J, coeffs
     )
 end
+
+# function DAETSCache(u, rate_prototype, ::Type{matType}) where matType
+#     # Initialize with empty coeffs vector
+#     return DAETSCache(
+#         zeros(matType, length(u), length(u)),  # Σ
+#         zeros(Int, length(u)),  # c
+#         zeros(Int, length(u)),  # d
+#         zeros(matType, length(u), length(u)),  # J
+#         zero(u),  # xTS
+#         zero(u),  # xtrial
+#         0.0,  # htrial
+#         0.0,  # e
+#         zero(u),  # tmp
+#         zero(u),  # atmp
+#         zero(rate_prototype),  # xcur
+#         Vector{typeof(u)}()  # coeffs (empty vector)
+#     )
+# end
+
 get_fsalfirstlast(cache::DAETSCache, u) = (cache.k1, cache.k1)
